@@ -11,7 +11,8 @@
 #include <time.h>
 #include <pthread.h>
 #include <stdbool.h>
-#include <dirent.h> 
+#include <dirent.h>
+#include <string.h>
 
 #define DIM 3
 #define LENGHT DIM
@@ -83,20 +84,39 @@ void apply_effect(Image* original, Image* new_i) {
 
 void* producer(void* arg);
 void* producer(void* arg) {
-
+    
 	DIR *directory;
 	struct dirent * dir;
 	directory = opendir("./input");
 	if(directory) {
-		while((dir = readdir(directory) != NULL)) {
-			Image img = open_bitmap(dir->d_name);
-			Image new_i;
+		while((dir = readdir(directory)) != NULL) {
+			printf("%s\n",dir->d_name);
+			int process = 0;
+			char substring[4] = ".bmp";
 
-			apply_effect(&img, &new_i);
-			if ( stack.count < stack.max) {
-				stack.data[stack.count] = new_i;
-				stack.count = stack.count +1;
+			pthread_mutex_lock(&stack.lock);
+			while (process != 1) 
+			{
+				char* pos = strstr(dir->d_name, substring);
+				if (pos) {
+					Image img = open_bitmap(dir->d_name);
+					Image new_i;
+
+					if ( stack.count < stack.max) {
+						apply_effect(&img, &new_i);
+						stack.data[stack.count] = new_i;
+						stack.count = stack.count +1;
+						pthread_cond_signal(&stack.can_consume);
+					}
+					
+			    	printf("test %d\n", stack.count);
+					process = 1;
+				} else {
+					process = 1;
+				}
 			}
+			pthread_mutex_unlock(&stack.lock);
+
 		}
 		closedir(directory);
 	}
@@ -112,27 +132,36 @@ void* consumer(void* arg) {
 	seconds = time(NULL);
 	
 	while(1) {
+		pthread_mutex_lock(&stack.lock);
+		pthread_cond_wait(&stack.can_consume, &stack.lock);
 		if (stack.count > 0 ) {
 			Image img = stack.data[stack.count];
-			char imageName[] = seconds/3600 + "test_out.bmp";
-			if ( save_bitmap(img, imageName) == 0) {	
+			int test = (seconds/3600);
+			char time[100] = "";
+			sprintf(time, "%d", test);
+			char imageName[12] = "test_out.bmp";
+
+            strcat(time, imageName);
+			puts(time);
+
+			printf("that is the value '%s'", time);
+
+			if ( save_bitmap(img, time) == 0) {	
 				stack.count = stack.count - 1;
 			} else {
 				printf("Something went wrong with image number %d", stack.count);
 			}
 		} else {
-			break;
+			printf("fail %d\n", stack.count);
 		}
+		pthread_mutex_unlock(&stack.lock);
+
 	}
 	
 	return NULL;
 }
 
 int main(int argc, char** argv) {
-
-	//Image img = open_bitmap("bmp_tank.bmp");
-	//Image new_i;
-
 	pthread_t threads_id[2];
 
 	stack_init();
@@ -142,18 +171,13 @@ int main(int argc, char** argv) {
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
 	for ( int i = 0; i < 1; i++) {
-		pthread_create(&threads_id[i], &attr, producer, NULL);
+	    pthread_create(&threads_id[i], &attr, producer, NULL);
 	}
 
 	pthread_create(&threads_id[1], NULL, consumer, NULL);
 
 	pthread_join(threads_id[1], NULL);
 	pthread_attr_destroy(&attr);
-	
-	
-	//apply_effect(&img, &new_i);
-	//save_bitmap(new_i, "test_out.bmp");
-	
 	
 	return 0;
 }
