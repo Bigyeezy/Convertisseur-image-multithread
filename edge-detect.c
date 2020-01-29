@@ -5,12 +5,9 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include "bitmap.h"
 #include <stdint.h>
-#include <time.h>
 #include <pthread.h>
-#include <stdbool.h>
 #include <dirent.h>
 #include <string.h>
 
@@ -18,6 +15,7 @@
 #define LENGHT DIM
 #define OFFSET DIM /2
 #define STACK_MAX 10
+#define LENGTH_STACK_OF_FILES 50
 
 const float KERNEL[DIM][DIM] = {{-1, -1,-1},
 							   {-1,8,-1},
@@ -25,8 +23,11 @@ const float KERNEL[DIM][DIM] = {{-1, -1,-1},
 
 typedef struct stack_t {
     Image data[STACK_MAX];
+	char* filesToProcess[LENGTH_STACK_OF_FILES];
     int count;
+	int fileToProcessCount;
     int max;
+	int maxFileToProcess;
     pthread_mutex_t lock;
     pthread_cond_t can_consume;
     pthread_cond_t can_produce;
@@ -45,7 +46,9 @@ void stack_init() {
     pthread_cond_init(&stack.can_consume, NULL);
     pthread_mutex_init(&stack.lock, NULL);
     stack.max = STACK_MAX;
+	stack.maxFileToProcess = LENGTH_STACK_OF_FILES;
     stack.count = 0;
+	stack.fileToProcessCount = 0;
     srand(time(NULL));
 }
 
@@ -84,100 +87,147 @@ void apply_effect(Image* original, Image* new_i) {
 
 void* producer(void* arg);
 void* producer(void* arg) {
-    
-	DIR *directory;
-	struct dirent * dir;
-	directory = opendir("./input");
-	if(directory) {
-		while((dir = readdir(directory)) != NULL) {
-			printf("%s\n",dir->d_name);
-			int process = 0;
-			char substring[4] = ".bmp";
 
+	while (1)
+	{
+		
+		if (stack.fileToProcessCount <= 0) {
+			printf("[PRODUCER] Plus de fichier a traiter.\n\n");
+			break;
+		} else {
 			pthread_mutex_lock(&stack.lock);
-			while (process != 1) 
-			{
-				char* pos = strstr(dir->d_name, substring);
-				if (pos) {
-					Image img = open_bitmap(dir->d_name);
-					Image new_i;
+			stack.fileToProcessCount--;
+			printf("[PRODUCER] stack count %d\n",stack.fileToProcessCount );
+			printf("[PRODUCER] Fichier en cours de traitement '%s'\n", stack.filesToProcess[stack.fileToProcessCount]);
 
-					if ( stack.count < stack.max) {
-						apply_effect(&img, &new_i);
-						stack.data[stack.count] = new_i;
-						stack.count = stack.count +1;
-						pthread_cond_signal(&stack.can_consume);
-					}
-					
-			    	printf("test %d\n", stack.count);
-					process = 1;
-				} else {
-					process = 1;
+			if (stack.count >= stack.max) {
+				printf("[PRODUCER] En Attente, la stack est plein...\n");
+				while (stack.count >= stack.max)
+				{	
+					pthread_cond_wait(&stack.can_produce, &stack.lock);
 				}
-			}
+				printf("[PRODUCER] la stack est prête !\n");
+			} 
+
+			char inputpath[90] = "/mnt/d/Document/workspace/C/Convertisseur-image-multithread/input/"; // peut etre sauvegarder dans la stack aussi
+			printf("[PRODUCER] Ouverture de l'image\n");
+			Image img = open_bitmap(strcat(inputpath,stack.filesToProcess[stack.fileToProcessCount]));
+			Image new_i;
+			printf("[PRODUCER] Application des effets\n");
+			apply_effect(&img, &new_i);
+			stack.data[stack.count] = new_i;
+			stack.count++;
+			printf("[PRODUCER] Fichier traité\n");
+			pthread_cond_signal(&stack.can_consume);	
 			pthread_mutex_unlock(&stack.lock);
-
 		}
-		closedir(directory);
 	}
-
+	
 	return NULL;
 }
 
 void* consumer(void* arg);
 void* consumer(void* arg) {
-
-	//int total = stack.count;
-	time_t seconds;
-	seconds = time(NULL);
 	
+	int outputCount = stack.fileToProcessCount;
+
 	while(1) {
 		pthread_mutex_lock(&stack.lock);
-		pthread_cond_wait(&stack.can_consume, &stack.lock);
-		if (stack.count > 0 ) {
-			Image img = stack.data[stack.count];
-			int test = (seconds/3600);
-			char time[100] = "";
-			sprintf(time, "%d", test);
-			char imageName[12] = "test_out.bmp";
 
-            strcat(time, imageName);
-			puts(time);
-
-			printf("that is the value '%s'", time);
-
-			if ( save_bitmap(img, time) == 0) {	
-				stack.count = stack.count - 1;
-			} else {
-				printf("Something went wrong with image number %d", stack.count);
-			}
-		} else {
-			printf("fail %d\n", stack.count);
+		while (stack.count == 0)
+		{
+			printf("[CONSUMER] Pas d'image a traiter pour le moment..\n");
+			pthread_cond_wait(&stack.can_consume, &stack.lock);
 		}
-		pthread_mutex_unlock(&stack.lock);
 
+		stack.count--;
+		outputCount--;
+		printf("[CONSUMER] Enregistrement de l'image numéro : %d\n", stack.count);
+		
+		char outputPath[100] = "/mnt/d/Document/workspace/C/Convertisseur-image-multithread/output/";
+		char outputImageName[50];
+		sprintf(outputImageName, "bmp_tank_output%d.bmp", outputCount);
+		strcat(outputPath, outputImageName);
+
+		printf("[CONSUMER] Enregistrement de l'image dans le fichier suivant : '%s'", outputPath);
+
+		
+		save_bitmap(stack.data[stack.count], outputPath) ;
+		
+		
+		
+		printf("[CONSUMER] Fichié sauvegardé ! Le nombre d'image restant est  : %d\n", stack.count);
+		
+		if (outputCount < 0) {
+			printf("[CONSUMER] Plus d'image à traiter.\n\n");
+			break;
+		}
+		
+		pthread_cond_broadcast(&stack.can_produce);
+		pthread_mutex_unlock(&stack.lock);
 	}
 	
 	return NULL;
 }
 
+
+/**/
+
+void get_all_files_from_folder(char* inputPath) {
+	printf("[GET_INPUT_FILES] Récupération des fichiers à traiter dans le répertoire '%s'\n", inputPath);
+
+	DIR *directory;
+	struct dirent *file;
+	directory = opendir(inputPath);
+	if (directory) {
+		while ((file = readdir(directory)) != NULL)
+		{
+			printf("[GET_INPUT_FILES] Fichier en cours de traitement : %s \n", file->d_name);
+			if (strstr(file->d_name, ".bmp") != NULL) {
+				if (stack.fileToProcessCount < stack.maxFileToProcess) {
+					stack.filesToProcess[stack.fileToProcessCount] = file->d_name;
+					stack.fileToProcessCount++;
+					printf("[GET_INPUT_FILES] Fichier enregistré. : %s \n", file->d_name);
+				} else {
+					printf("[GET_INPUT_FILES] Le nombre de fichier *.bmp a taité est trop important. Seul les %d premiers fichiers seront traités.\n", LENGTH_STACK_OF_FILES);
+				}
+			} 
+		}
+		closedir(directory);
+		printf("[GET_INPUT_FILES] Fin de la récupération des fichiers.\n\n");
+		
+	} else {
+		printf("[GET_INPUT_FILES] Impossible d'ouvrir le répertoire d'entrée.\n\n");
+		return ;
+	}
+}
+
+
+/**/
+
 int main(int argc, char** argv) {
-	pthread_t threads_id[2];
+	pthread_t threads_id[5];
 
 	stack_init();
+
+	get_all_files_from_folder("/mnt/d/Document/workspace/C/Convertisseur-image-multithread/input/");
+
+	for (int i = 0; i < stack.fileToProcessCount; i++) {
+		printf("file number %d : %s\n", i, stack.filesToProcess[i]);
+	}
 
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
-	for ( int i = 0; i < 1; i++) {
+	for ( int i = 0; i < 4; i++) {
 	    pthread_create(&threads_id[i], &attr, producer, NULL);
 	}
 
-	pthread_create(&threads_id[1], NULL, consumer, NULL);
+	pthread_create(&threads_id[4], NULL, consumer, NULL);
 
-	pthread_join(threads_id[1], NULL);
-	pthread_attr_destroy(&attr);
+	pthread_join(threads_id[4], NULL);
+	pthread_attr_destroy(&attr); 
 	
 	return 0;
 }
